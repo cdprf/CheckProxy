@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.4.33110.190
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CheckProxy", "CheckProxy.csproj", "{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		rel|Any CPU = rel|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.rel|Any CPU.ActiveCfg = rel|Any CPU
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.rel|Any CPU.Build.0 = rel|Any CPU
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5D4F423F-00BA-4FB7-915D-AC66CCA1A75F}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {DA1B7AFC-D236-43E2-9343-7671B5F139A4}
+	EndGlobalSection
+EndGlobal

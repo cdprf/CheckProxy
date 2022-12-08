@@ -1,0 +1,8 @@
+{
+    "profiles": {
+        "CheckProxy": {
+            "commandName": "Project",
+            "commandLineArgs": "188.165.0.203:8080"
+        }
+    }
+}
