@@ -1,52 +1,67 @@
 # CheckProxy
 
-CheckProxy is a command-line tool designed to quickly test the connectivity and validity of proxy servers. It simultaneously checks both SOCKS and HTTP proxy connections and displays the results clearly and concisely.
-
+CheckProxy is a modern, fast, and efficient command-line tool for checking the validity of HTTP proxy servers. It's built with .NET 6 and leverages asynchronous operations to check proxies concurrently, providing clear and concise results.
 
 ## Features
 
-- **Proxy Testing**: Quickly test the availability and responsiveness of SOCKS and HTTP proxies.
-- **Batch Testing**: Provide a list of proxy servers (e.g., from a file) and CheckProxy will test them all.
-- **Proxy Extraction**: Automatically extract and combine proxy server lists from a directory of files.
-- **Detailed Output**: Clearly display the proxy type, IP address, port, and connection status for each tested proxy.
+- **High Performance**: Built with async operations to test a large number of proxies very quickly.
+- **Concurrent Checks**: Uses a semaphore to control the level of parallelism, preventing system overload.
+- **Flexible Input**: Test a single proxy or a list of proxies from a file.
+- **Configurable Timeout**: Set a custom timeout for all checks.
+- **Clear Output**: Uses Spectre.Console to display results in a clean, color-coded table.
 
 ## Installation
 
-You can install CheckProxy using pip:
+To use CheckProxy, you can either download a pre-built executable from the Releases page (TBD) or build it from source.
 
-```
-download it and put it anywhere wich in your environment path checkproxy
-```
+### Building from Source
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/your-username/checkproxy.git
+    cd checkproxy
+    ```
+
+2.  **Build the project:**
+    You will need the [.NET 6 SDK](https://dotnet.microsoft.com/download/dotnet/6.0) installed.
+    ```bash
+    dotnet build -c Release
+    ```
+
+3.  **Run the application:**
+    After building, you can find the executable in the `bin/Release/net6.0` directory.
+    ```bash
+    ./bin/Release/net6.0/CheckProxy --help
+    ```
 
 ## Usage
 
-To test a single proxy:
-
-```
-checkproxy 192.168.1.100:8080
-```
-
-To test a list of proxies from a file:
-
-```
-checkproxy proxies.txt
+### Test a Single Proxy
+```bash
+CheckProxy 192.168.1.100:8080
 ```
 
-To extract and combine proxy lists from a directory:
-
+### Test a List of Proxies from a File
+Provide a text file with one proxy per line.
+```bash
+CheckProxy --file proxies.txt
 ```
-checkproxy --extract-proxies  http://example.com/freeproxies -output extracted.txt
+
+### Set a Custom Timeout
+You can specify a timeout in milliseconds for the checks. The default is 5000ms.
+```bash
+CheckProxy --file proxies.txt --timeout 10000
 ```
 
-For more information on usage and available options, please run:
-
-```
-checkproxy --help
+### Get Help
+For a full list of commands and options, run:
+```bash
+CheckProxy --help
 ```
 
 ## Contributing
 
-Contributions to CheckProxy are welcome! If you find a bug or have a feature request, please open an issue on the [GitHub repository](https://github.com/your-username/checkproxy). Pull requests are also encouraged.
+Contributions to CheckProxy are welcome! If you find a bug or have a feature request, please open an issue on the GitHub repository. Pull requests are also encouraged.
 
 ## License
 
