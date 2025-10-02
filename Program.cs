@@ -1,232 +1,257 @@
-﻿// See https://aka.ms/new-console-template for more information
-using RestSharp;
 using Spectre.Console;
-using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.CommandLine;
 
-//var arg = "188.165.0.203:8080";
-string parameter;
-IPEndPoint p = new IPEndPoint(127001, 1080);
-string[] arguments = Environment.GetCommandLineArgs();
-
-var columns = new List<Markup>(){
-    new Markup("[bold]Pingable[/]"),
-    new Markup("[bold]SoketConnect[/]"),
-    new Markup("[bold]PingTcpSock[/]"),
-    new Markup("[bold]TestRestCli[/]"),
-    new Markup("[bold]WebClientCheck[/]"),
-    new Markup("[bold]HttpClientCheck[/]")
-};
-
-if (arguments != null && arguments.Count() > 0)
+/// <summary>
+/// Defines the entry point for the application.
+/// </summary>
+public class Program
 {
-    parameter = arguments[1].Trim();
-    if (IPEndPoint.TryParse(parameter, out p))
+    /// <summary>
+    /// The main entry point for the application.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <returns>An integer representing the exit code.</returns>
+    public static async Task<int> Main(string[] args)
     {
-        var wp = new WebProxy(parameter);
+        var proxyArgument = new Argument<string?>("proxy", "A single proxy address (e.g., 1.2.3.4:8080).");
+        var fileOption = new Option<FileInfo?>("--file", "A file containing a list of proxies, one per line.");
+        var timeoutOption = new Option<int>("--timeout", () => 5000, "Timeout in milliseconds for each check.");
 
-        AnsiConsole.MarkupLine("Target: [bold]" + parameter + "[/]");
+        var rootCommand = new RootCommand("CheckProxy - A tool to check the validity of proxy servers.")
+        {
+            proxyArgument,
+            fileOption,
+            timeoutOption
+        };
+
+        rootCommand.SetHandler(async (proxy, file, timeout) =>
+        {
+            if (proxy != null)
+            {
+                await CheckSingleProxy(proxy, timeout);
+            }
+            else if (file != null)
+            {
+                await CheckProxiesFromFile(file, timeout);
+            }
+            else
+            {
+                AnsiConsole.MarkupLine("[red]Error: You must provide a proxy address or a file.[/]");
+            }
+        }, proxyArgument, fileOption, timeoutOption);
+
+        return await rootCommand.InvokeAsync(args);
+    }
+
+    /// <summary>
+    /// Checks a single proxy address and displays the results.
+    /// </summary>
+    /// <param name="proxyAddress">The proxy address string (e.g., "1.2.3.4:8080").</param>
+    /// <param name="timeout">The timeout in milliseconds for each check.</param>
+    static async Task CheckSingleProxy(string proxyAddress, int timeout)
+    {
+        if (IPEndPoint.TryParse(proxyAddress, out var proxyEndPoint))
+        {
+            var webProxy = new WebProxy(proxyAddress);
+            AnsiConsole.MarkupLine("Target: [bold]" + proxyAddress + "[/]");
+
+            var columns = new List<Markup>
+            {
+                new Markup("[bold]Ping Check[/]"),
+                new Markup("[bold]TCP Connection[/]"),
+                new Markup("[bold]HTTP Proxy Check[/]"),
+            };
+            AnsiConsole.Write(new Columns(columns));
+
+            var results = await RunChecksInParallel(webProxy, proxyEndPoint, timeout);
+            AnsiConsole.Write(new Columns(results.Select(r => new Markup(r.ToString()))));
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]Error:[/] Invalid proxy address format: {proxyAddress}");
+        }
+    }
+
+    /// <summary>
+    /// Reads a list of proxy addresses from a file and checks them concurrently.
+    /// </summary>
+    /// <param name="file">The file containing the list of proxies.</param>
+    /// <param name="timeout">The timeout in milliseconds for each check.</param>
+    static async Task CheckProxiesFromFile(FileInfo file, int timeout)
+    {
+        if (!file.Exists)
+        {
+            AnsiConsole.MarkupLine($"[red]Error:[/] File not found: {file.FullName}");
+            return;
+        }
+
+        var proxies = await File.ReadAllLinesAsync(file.FullName);
+        AnsiConsole.MarkupLine($"[yellow]Found {proxies.Length} proxies in {file.Name}. Starting checks...[/]");
+
+        var columns = new List<Markup>
+        {
+            new Markup("[bold]Proxy[/]"),
+            new Markup("[bold]Ping[/]"),
+            new Markup("[bold]TCP[/]"),
+            new Markup("[bold]HTTP[/]"),
+        };
         AnsiConsole.Write(new Columns(columns));
-        AnsiConsole.Write(new Columns(
-            new Markup(Pingable(parameter).ToString()),
-            new Markup(SoketConnect(wp.Address.Host, wp.Address.Port).ToString()),
-            new Markup(PingTcpSock(wp.Address.Host.ToString(), wp.Address.Port).ToString()),
-            new Markup(TestRestCli(wp).ToString()),
-            new Markup(WebClientCheck(wp).ToString()),
-            new Markup(HttpCliCheckAsync(wp).Result.ToString())
-            ));
 
-        //AnsiConsole.MarkupLine("[bold]Pingable : [/]" + Pingable(parameter).ToString());
-        //TestProxy(wp);
-        //AnsiConsole.MarkupLine("[bold]SoketConnect :[/] " + SoketConnect(wp.Address.Host, wp.Address.Port));
-        //AnsiConsole.MarkupLine("[bold]PingHost: [/]" + PingHost(wp.Address.Host.ToString(), wp.Address.Port));
-    }
-}
-else
-{
-    PrintHelp("no argument given.");
-}
+        var tasks = new List<Task>();
+        var semaphore = new SemaphoreSlim(10); // Limit to 10 concurrent checks
 
-Console.ReadLine();
-
-static void PrintHelp(string message)
-{ Console.WriteLine(message); }
-
-static void TestProxies(string proxyfile)
-{
-    var lowp = new List<WebProxy> { new WebProxy("1.2.3.4", 8080), new WebProxy("5.6.7.8", 80) };
-
-    Parallel.ForEach(lowp, wp =>
-    {
-        TestRestCli(wp);
-    });
-}
-
-static async Task<bool> HttpCliCheckAsync(WebProxy wp)
-{
-    // Create an HttpClientHandler object and set to use default credentials
-    //HttpClientHandler handler = new HttpClientHandler();
-    //handler.UseDefaultCredentials = true;
-
-    var handler = new HttpClientHandler()
-    {
-        Proxy = new WebProxy(new Uri($"socks5://{wp.Address.Host}:{wp.Address.Port}")),
-        UseProxy = true,
-    };
-
-    //var socketsHandler = new SocketsHttpHandler
-    //{
-    //    PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-    //    Proxy = wp,
-    //    ConnectTimeout = TimeSpan.FromSeconds(30),
-    //    UseProxy = true,
-    //};
-    //socketsHandler.Proxy= new 
-    // HttpClient is intended to be instantiated once per application, rather than per-use. See Remarks.
-    //HttpClient client = new HttpClient(socketsHandler);
-    HttpClient client = new HttpClient(handler);
-
-    try
-    {
-        using HttpResponseMessage response = await client.GetAsync("http://www.contoso.com/");
-        response.EnsureSuccessStatusCode();
-        string responseBody = await response.Content.ReadAsStringAsync();
-        // Above three lines can be replaced with new helper method below
-        // string responseBody = await client.GetStringAsync(uri);
-        //Console.WriteLine(responseBody);
-        return true;
-    }
-    catch (HttpRequestException e)
-    {
-        Console.WriteLine(e.Message);
-        return false;
-    }
-    finally
-    {
-        handler.Dispose();
-        client.Dispose();
-    }
-    
-}
-static bool WebClientCheck(WebProxy wp)
-{
-    WebClient webClient = new WebClient();
-    webClient.Proxy = wp;
-    webClient.BaseAddress = "http://ipmoz.com";
-    try
-    {
-        var res = webClient.DownloadString("HTTP://ipmoz.com/");
-        if (res.Contains(wp.Address.Host.ToString()))
-            return true;
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine(wp.Address.OriginalString + " : " + ex.Message);
-    }
-    return false;
-}
-static bool Pingable(string address)
-{
-    Ping ping = new Ping();
-    try
-    {
-        PingReply reply = ping.Send(address, 10000);
-        if (reply == null) return false;
-
-        return (reply.Status == IPStatus.Success);
-    }
-    catch (PingException e)
-    {
-        return false;
-    }
-}
-
-static bool TestRestCli(WebProxy wp)
-{
-    bool success = false;
-    string errorMsg = "";
-    var sw = new Stopwatch();
-    try
-    {
-        sw.Start();
-        var Cli = new RestClient("http://ipmoz.com");
-        Cli.Options.Proxy = wp;
-        Cli.Options.MaxTimeout = 20;
-        Cli.Options.Timeout = 10;
-
-        var response = Cli.Execute(new RestRequest
+        foreach (var proxyAddress in proxies)
         {
-            Resource = "/",
-            Method = Method.Get,
-            Timeout = 10000,
-            //            RequestFormat = DataFormat.Json
-        });
+            await semaphore.WaitAsync();
 
-        if (response.ErrorException != null)
-        {
-            throw response.ErrorException;
+            tasks.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    if (IPEndPoint.TryParse(proxyAddress, out var proxyEndPoint))
+                    {
+                        var webProxy = new WebProxy(proxyAddress);
+                        var results = await RunChecksInParallel(webProxy, proxyEndPoint, timeout);
+                        AnsiConsole.Write(new Columns(
+                            new Markup(proxyAddress),
+                            new Markup(results[0].ToString()),
+                            new Markup(results[1].ToString()),
+                            new Markup(results[2].ToString())
+                        ));
+                    }
+                    else
+                    {
+                        AnsiConsole.Write(new Columns(
+                            new Markup(proxyAddress),
+                            new Markup("[red]Invalid[/]"),
+                            new Markup("[red]Invalid[/]"),
+                            new Markup("[red]Invalid[/]")
+                        ));
+                    }
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }));
         }
-        success = (response.Content == wp.Address.Host);
-        return true;
-    }
-    catch (Exception ex)
-    {
-        errorMsg = ex.Message;
-        return false;
-    }
-    finally
-    {
-        sw.Stop();
-        //return ""
-        //AnsiConsole.MarkupLine("[bold]Success:[/]" + success.ToString() + " | [bold]Connection Time:[/]" + sw.Elapsed.TotalSeconds + "| [bold]ErrorMsg:[/] " + errorMsg);
-    }
-}
 
-static bool SoketConnect(string host, int port)
-{
-    var is_success = false;
-    try
+        await Task.WhenAll(tasks);
+        AnsiConsole.MarkupLine("[green]All proxy checks complete.[/]");
+    }
+
+    /// <summary>
+    /// Runs a series of checks for a given proxy in parallel.
+    /// </summary>
+    /// <param name="wp">The WebProxy object for the proxy.</param>
+    /// <param name="proxyEp">The IPEndPoint for the proxy.</param>
+    /// <param name="timeout">The timeout in milliseconds for each check.</param>
+    /// <returns>A boolean array indicating the result of each check.</returns>
+    static async Task<bool[]> RunChecksInParallel(WebProxy wp, IPEndPoint proxyEp, int timeout)
     {
-        var connsock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        connsock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendTimeout, 200);
-        System.Threading.Thread.Sleep(500);
-        var hip = IPAddress.Parse(host);
-        var ipep = new IPEndPoint(hip, port);
-        connsock.Connect(ipep);
-        if (connsock.Connected)
+        var pingCheckTask = PingCheckAsync(proxyEp.Address.ToString(), timeout);
+        var tcpConnectionTask = TcpConnectionCheckAsync(wp.Address.Host, wp.Address.Port, timeout);
+        var httpProxyCheckTask = HttpProxyCheckAsync(wp, timeout);
+
+        await Task.WhenAll(
+            pingCheckTask,
+            tcpConnectionTask,
+            httpProxyCheckTask);
+
+        return new[]
         {
-            is_success = true;
+            pingCheckTask.Result,
+            tcpConnectionTask.Result,
+            httpProxyCheckTask.Result,
+        };
+    }
+
+    /// <summary>
+    /// Performs an HTTP GET request through the proxy to check its functionality.
+    /// </summary>
+    /// <param name="wp">The WebProxy to use for the request.</param>
+    /// <param name="timeout">The timeout in milliseconds for the request.</param>
+    /// <returns>True if the request is successful; otherwise, false.</returns>
+    static async Task<bool> HttpProxyCheckAsync(WebProxy wp, int timeout)
+    {
+        var handler = new HttpClientHandler
+        {
+            Proxy = wp,
+            UseProxy = true,
+        };
+
+        using var client = new HttpClient(handler);
+        client.Timeout = TimeSpan.FromMilliseconds(timeout);
+
+        try
+        {
+            using var response = await client.GetAsync("http://www.google.com/generate_204");
+            return response.IsSuccessStatusCode;
         }
-        connsock.Close();
+        catch
+        {
+            return false;
+        }
     }
-    catch (Exception)
-    {
-        is_success = false;
-    }
-    return is_success;
-}
 
-static bool PingTcpSock(string strIP, int intPort)
-{
-    bool blProxy = false;
-    try
+    /// <summary>
+    /// Pings the specified address to check for reachability.
+    /// </summary>
+    /// <param name="address">The IP address or hostname to ping.</param>
+    /// <param name="timeout">The timeout in milliseconds for the ping.</param>
+    /// <returns>True if the ping is successful; otherwise, false.</returns>
+    static async Task<bool> PingCheckAsync(string address, int timeout)
     {
-        TcpClient client = new TcpClient(strIP, intPort);
-
-        blProxy = true;
+        using var ping = new Ping();
+        try
+        {
+            var reply = await ping.SendPingAsync(address, timeout);
+            return reply?.Status == IPStatus.Success;
+        }
+        catch (PingException)
+        {
+            return false;
+        }
     }
-    catch (Exception ex)
+
+    /// <summary>
+    /// Attempts to open a TCP socket to the specified host and port.
+    /// </summary>
+    /// <param name="host">The target host.</param>
+    /// <param name="port">The target port.</param>
+    /// <param name="timeout">The timeout in milliseconds for the connection attempt.</param>
+    /// <returns>True if the connection is successful; otherwise, false.</returns>
+    static async Task<bool> TcpConnectionCheckAsync(string host, int port, int timeout)
     {
-        Console.WriteLine("Error pinging host:'" + strIP + ":" + intPort.ToString() + "'");
-        return false;
-    }
-    return blProxy;
-}
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            var connectTask = socket.ConnectAsync(host, port);
+            var timeoutTask = Task.Delay(TimeSpan.FromMilliseconds(timeout));
 
-static void ReadFile(FileInfo file)
-{
-    File.ReadLines(file.FullName).ToList()
-        .ForEach(line => Console.WriteLine(line));
+            var completedTask = await Task.WhenAny(connectTask, timeoutTask);
+
+            if (completedTask == timeoutTask)
+            {
+                return false;
+            }
+
+            await connectTask;
+            return socket.Connected;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (socket.Connected)
+            {
+                socket.Disconnect(false);
+            }
+        }
+    }
 }
