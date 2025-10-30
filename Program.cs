@@ -1,7 +1,7 @@
+using Newtonsoft.Json;
 using Spectre.Console;
 using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
+using System.Text;
 using System.CommandLine;
 
 /// <summary>
@@ -19,29 +19,31 @@ public class Program
         var proxyArgument = new Argument<string?>("proxy", "A single proxy address (e.g., 1.2.3.4:8080).");
         var fileOption = new Option<FileInfo?>("--file", "A file containing a list of proxies, one per line.");
         var timeoutOption = new Option<int>("--timeout", () => 5000, "Timeout in milliseconds for each check.");
+        var outputOption = new Option<string?>("--output", "The path to the output file (e.g., proxies.csv or proxies.json).");
 
         var rootCommand = new RootCommand("CheckProxy - A tool to check the validity of proxy servers.")
         {
             proxyArgument,
             fileOption,
-            timeoutOption
+            timeoutOption,
+            outputOption
         };
 
-        rootCommand.SetHandler(async (proxy, file, timeout) =>
+        rootCommand.SetHandler(async (proxy, file, timeout, output) =>
         {
             if (proxy != null)
             {
-                await CheckSingleProxy(proxy, timeout);
+                await CheckSingleProxy(proxy, timeout, output);
             }
             else if (file != null)
             {
-                await CheckProxiesFromFile(file, timeout);
+                await CheckProxiesFromFile(file, timeout, output);
             }
             else
             {
                 AnsiConsole.MarkupLine("[red]Error: You must provide a proxy address or a file.[/]");
             }
-        }, proxyArgument, fileOption, timeoutOption);
+        }, proxyArgument, fileOption, timeoutOption, outputOption);
 
         return await rootCommand.InvokeAsync(args);
     }
@@ -51,23 +53,38 @@ public class Program
     /// </summary>
     /// <param name="proxyAddress">The proxy address string (e.g., "1.2.3.4:8080").</param>
     /// <param name="timeout">The timeout in milliseconds for each check.</param>
-    static async Task CheckSingleProxy(string proxyAddress, int timeout)
+    /// <param name="output">The path to the output file.</param>
+    static async Task CheckSingleProxy(string proxyAddress, int timeout, string? output)
     {
-        if (IPEndPoint.TryParse(proxyAddress, out var proxyEndPoint))
+        if (IPEndPoint.TryParse(proxyAddress, out _))
         {
             var webProxy = new WebProxy(proxyAddress);
-            AnsiConsole.MarkupLine("Target: [bold]" + proxyAddress + "[/]");
+            var checker = new ProxyChecker(webProxy);
+            var proxyInfo = await checker.CheckProxyAsync();
 
-            var columns = new List<Markup>
+            var table = new Table();
+            table.AddColumn("Property");
+            table.AddColumn("Value");
+
+            table.AddRow("Address", proxyInfo.Address ?? "N/A");
+            table.AddRow("Type", proxyInfo.Type ?? "N/A");
+            table.AddRow("Anonymity", proxyInfo.Anonymity ?? "N/A");
+            table.AddRow("Country", proxyInfo.Country ?? "N/A");
+            table.AddRow("ASN", proxyInfo.Asn ?? "N/A");
+            table.AddRow("Outgoing IP", proxyInfo.OutgoingIp ?? "N/A");
+            table.AddRow("Alive", proxyInfo.IsAlive ? "[green]Yes[/]" : "[red]No[/]");
+            table.AddRow("Additional Headers", proxyInfo.AdditionalHeaders ?? "N/A");
+            table.AddRow("Latency", proxyInfo.Latency == -1 ? "N/A" : $"{proxyInfo.Latency} ms");
+            table.AddRow("Download Speed", proxyInfo.DownloadSpeed == -1 ? "N/A" : $"{proxyInfo.DownloadSpeed:F2} KB/s");
+            table.AddRow("Score", $"{proxyInfo.Score}/100");
+            table.AddRow("Blacklisted", proxyInfo.IsBlacklisted ? "[red]Yes[/]" : "[green]No[/]");
+
+            AnsiConsole.Write(table);
+
+            if (output != null)
             {
-                new Markup("[bold]Ping Check[/]"),
-                new Markup("[bold]TCP Connection[/]"),
-                new Markup("[bold]HTTP Proxy Check[/]"),
-            };
-            AnsiConsole.Write(new Columns(columns));
-
-            var results = await RunChecksInParallel(webProxy, proxyEndPoint, timeout);
-            AnsiConsole.Write(new Columns(results.Select(r => new Markup(r.ToString()))));
+                await WriteResultsToFile(new List<ProxyInfo> { proxyInfo }, output);
+            }
         }
         else
         {
@@ -80,7 +97,8 @@ public class Program
     /// </summary>
     /// <param name="file">The file containing the list of proxies.</param>
     /// <param name="timeout">The timeout in milliseconds for each check.</param>
-    static async Task CheckProxiesFromFile(FileInfo file, int timeout)
+    /// <param name="output">The path to the output file.</param>
+    static async Task CheckProxiesFromFile(FileInfo file, int timeout, string? output)
     {
         if (!file.Exists)
         {
@@ -91,15 +109,20 @@ public class Program
         var proxies = await File.ReadAllLinesAsync(file.FullName);
         AnsiConsole.MarkupLine($"[yellow]Found {proxies.Length} proxies in {file.Name}. Starting checks...[/]");
 
-        var columns = new List<Markup>
-        {
-            new Markup("[bold]Proxy[/]"),
-            new Markup("[bold]Ping[/]"),
-            new Markup("[bold]TCP[/]"),
-            new Markup("[bold]HTTP[/]"),
-        };
-        AnsiConsole.Write(new Columns(columns));
+        var table = new Table();
+        table.AddColumn("Address");
+        table.AddColumn("Type");
+        table.AddColumn("Anonymity");
+        table.AddColumn("Country");
+        table.AddColumn("ASN");
+        table.AddColumn("Outgoing IP");
+        table.AddColumn("Alive");
+        table.AddColumn("Latency");
+        table.AddColumn("Download Speed");
+        table.AddColumn("Score");
+        table.AddColumn("Blacklisted");
 
+        var proxyInfos = new List<ProxyInfo>();
         var tasks = new List<Task>();
         var semaphore = new SemaphoreSlim(10); // Limit to 10 concurrent checks
 
@@ -111,25 +134,30 @@ public class Program
             {
                 try
                 {
-                    if (IPEndPoint.TryParse(proxyAddress, out var proxyEndPoint))
+                    if (IPEndPoint.TryParse(proxyAddress, out _))
                     {
                         var webProxy = new WebProxy(proxyAddress);
-                        var results = await RunChecksInParallel(webProxy, proxyEndPoint, timeout);
-                        AnsiConsole.Write(new Columns(
-                            new Markup(proxyAddress),
-                            new Markup(results[0].ToString()),
-                            new Markup(results[1].ToString()),
-                            new Markup(results[2].ToString())
-                        ));
+                        var checker = new ProxyChecker(webProxy);
+                        var proxyInfo = await checker.CheckProxyAsync();
+                        proxyInfos.Add(proxyInfo);
+
+                        table.AddRow(
+                            proxyInfo.Address ?? "N/A",
+                            proxyInfo.Type ?? "N/A",
+                            proxyInfo.Anonymity ?? "N/A",
+                            proxyInfo.Country ?? "N/A",
+                            proxyInfo.Asn ?? "N/A",
+                            proxyInfo.OutgoingIp ?? "N/A",
+                            proxyInfo.IsAlive ? "[green]Yes[/]" : "[red]No[/]",
+                            proxyInfo.Latency == -1 ? "N/A" : $"{proxyInfo.Latency} ms",
+                            proxyInfo.DownloadSpeed == -1 ? "N/A" : $"{proxyInfo.DownloadSpeed:F2} KB/s",
+                            $"{proxyInfo.Score}/100",
+                            proxyInfo.IsBlacklisted ? "[red]Yes[/]" : "[green]No[/]"
+                        );
                     }
                     else
                     {
-                        AnsiConsole.Write(new Columns(
-                            new Markup(proxyAddress),
-                            new Markup("[red]Invalid[/]"),
-                            new Markup("[red]Invalid[/]"),
-                            new Markup("[red]Invalid[/]")
-                        ));
+                        table.AddRow(proxyAddress, "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]No[/]", "N/A", "N/A", "0/100", "N/A");
                     }
                 }
                 finally
@@ -140,118 +168,42 @@ public class Program
         }
 
         await Task.WhenAll(tasks);
+        AnsiConsole.Write(table);
+
+        if (output != null)
+        {
+            await WriteResultsToFile(proxyInfos, output);
+        }
+
         AnsiConsole.MarkupLine("[green]All proxy checks complete.[/]");
     }
 
     /// <summary>
-    /// Runs a series of checks for a given proxy in parallel.
+    /// Writes the results to a file.
     /// </summary>
-    /// <param name="wp">The WebProxy object for the proxy.</param>
-    /// <param name="proxyEp">The IPEndPoint for the proxy.</param>
-    /// <param name="timeout">The timeout in milliseconds for each check.</param>
-    /// <returns>A boolean array indicating the result of each check.</returns>
-    static async Task<bool[]> RunChecksInParallel(WebProxy wp, IPEndPoint proxyEp, int timeout)
+    /// <param name="proxyInfos">The list of proxy info objects to write.</param>
+    /// <param name="output">The path to the output file.</param>
+    static async Task WriteResultsToFile(IEnumerable<ProxyInfo> proxyInfos, string output)
     {
-        var pingCheckTask = PingCheckAsync(proxyEp.Address.ToString(), timeout);
-        var tcpConnectionTask = TcpConnectionCheckAsync(wp.Address.Host, wp.Address.Port, timeout);
-        var httpProxyCheckTask = HttpProxyCheckAsync(wp, timeout);
-
-        await Task.WhenAll(
-            pingCheckTask,
-            tcpConnectionTask,
-            httpProxyCheckTask);
-
-        return new[]
+        var extension = Path.GetExtension(output).ToLower();
+        if (extension == ".json")
         {
-            pingCheckTask.Result,
-            tcpConnectionTask.Result,
-            httpProxyCheckTask.Result,
-        };
-    }
-
-    /// <summary>
-    /// Performs an HTTP GET request through the proxy to check its functionality.
-    /// </summary>
-    /// <param name="wp">The WebProxy to use for the request.</param>
-    /// <param name="timeout">The timeout in milliseconds for the request.</param>
-    /// <returns>True if the request is successful; otherwise, false.</returns>
-    static async Task<bool> HttpProxyCheckAsync(WebProxy wp, int timeout)
-    {
-        var handler = new HttpClientHandler
-        {
-            Proxy = wp,
-            UseProxy = true,
-        };
-
-        using var client = new HttpClient(handler);
-        client.Timeout = TimeSpan.FromMilliseconds(timeout);
-
-        try
-        {
-            using var response = await client.GetAsync("http://www.google.com/generate_204");
-            return response.IsSuccessStatusCode;
+            var json = JsonConvert.SerializeObject(proxyInfos, Formatting.Indented);
+            await File.WriteAllTextAsync(output, json);
         }
-        catch
+        else if (extension == ".csv")
         {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Pings the specified address to check for reachability.
-    /// </summary>
-    /// <param name="address">The IP address or hostname to ping.</param>
-    /// <param name="timeout">The timeout in milliseconds for the ping.</param>
-    /// <returns>True if the ping is successful; otherwise, false.</returns>
-    static async Task<bool> PingCheckAsync(string address, int timeout)
-    {
-        using var ping = new Ping();
-        try
-        {
-            var reply = await ping.SendPingAsync(address, timeout);
-            return reply?.Status == IPStatus.Success;
-        }
-        catch (PingException)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Attempts to open a TCP socket to the specified host and port.
-    /// </summary>
-    /// <param name="host">The target host.</param>
-    /// <param name="port">The target port.</param>
-    /// <param name="timeout">The timeout in milliseconds for the connection attempt.</param>
-    /// <returns>True if the connection is successful; otherwise, false.</returns>
-    static async Task<bool> TcpConnectionCheckAsync(string host, int port, int timeout)
-    {
-        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        try
-        {
-            var connectTask = socket.ConnectAsync(host, port);
-            var timeoutTask = Task.Delay(TimeSpan.FromMilliseconds(timeout));
-
-            var completedTask = await Task.WhenAny(connectTask, timeoutTask);
-
-            if (completedTask == timeoutTask)
+            var csv = new StringBuilder();
+            csv.AppendLine("Address,Type,Anonymity,Country,ASN,Outgoing IP,Alive,Latency,Download Speed");
+            foreach (var proxyInfo in proxyInfos)
             {
-                return false;
+                csv.AppendLine($"{proxyInfo.Address},{proxyInfo.Type},{proxyInfo.Anonymity},{proxyInfo.Country},{proxyInfo.Asn},{proxyInfo.OutgoingIp},{proxyInfo.IsAlive},{proxyInfo.Latency},{proxyInfo.DownloadSpeed}");
             }
-
-            await connectTask;
-            return socket.Connected;
+            await File.WriteAllTextAsync(output, csv.ToString());
         }
-        catch
+        else
         {
-            return false;
-        }
-        finally
-        {
-            if (socket.Connected)
-            {
-                socket.Disconnect(false);
-            }
+            AnsiConsole.MarkupLine("[red]Error:[/] Invalid output file format. Please use .csv or .json.[/]");
         }
     }
 }
