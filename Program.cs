@@ -1,6 +1,8 @@
+using IPNetwork2;
 using Newtonsoft.Json;
 using Spectre.Console;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.CommandLine;
 
@@ -20,30 +22,43 @@ public class Program
         var fileOption = new Option<FileInfo?>("--file", "A file containing a list of proxies, one per line.");
         var timeoutOption = new Option<int>("--timeout", () => 5000, "Timeout in milliseconds for each check.");
         var outputOption = new Option<string?>("--output", "The path to the output file (e.g., proxies.csv or proxies.json).");
+        var countryOption = new Option<string?>("--country", "The country to filter proxies by.");
+        var targetUrlOption = new Option<string?>("--target-url", "The URL to test the proxy against.");
 
         var rootCommand = new RootCommand("CheckProxy - A tool to check the validity of proxy servers.")
         {
             proxyArgument,
             fileOption,
             timeoutOption,
-            outputOption
+            outputOption,
+            countryOption,
+            targetUrlOption
         };
 
-        rootCommand.SetHandler(async (proxy, file, timeout, output) =>
+        var scanCommand = new Command("scan", "Scan a range of IP addresses for open proxy ports.");
+        var ipRangeOption = new Option<string>("--ip-range", "The IP range to scan (e.g., 1.2.3.0/24).");
+        scanCommand.AddOption(ipRangeOption);
+        scanCommand.SetHandler(async (ipRange) =>
+        {
+            await ScanProxies(ipRange);
+        }, ipRangeOption);
+        rootCommand.AddCommand(scanCommand);
+
+        rootCommand.SetHandler(async (proxy, file, timeout, output, country, targetUrl) =>
         {
             if (proxy != null)
             {
-                await CheckSingleProxy(proxy, timeout, output);
+                await CheckSingleProxy(proxy, timeout, output, country, targetUrl);
             }
             else if (file != null)
             {
-                await CheckProxiesFromFile(file, timeout, output);
+                await CheckProxiesFromFile(file, timeout, output, country, targetUrl);
             }
             else
             {
                 AnsiConsole.MarkupLine("[red]Error: You must provide a proxy address or a file.[/]");
             }
-        }, proxyArgument, fileOption, timeoutOption, outputOption);
+        }, proxyArgument, fileOption, timeoutOption, outputOption, countryOption, targetUrlOption);
 
         return await rootCommand.InvokeAsync(args);
     }
@@ -54,13 +69,20 @@ public class Program
     /// <param name="proxyAddress">The proxy address string (e.g., "1.2.3.4:8080").</param>
     /// <param name="timeout">The timeout in milliseconds for each check.</param>
     /// <param name="output">The path to the output file.</param>
-    static async Task CheckSingleProxy(string proxyAddress, int timeout, string? output)
+    /// <param name="country">The country to filter proxies by.</param>
+    /// <param name="targetUrl">The URL to test the proxy against.</param>
+    static async Task CheckSingleProxy(string proxyAddress, int timeout, string? output, string? country, string? targetUrl)
     {
         if (IPEndPoint.TryParse(proxyAddress, out _))
         {
             var webProxy = new WebProxy(proxyAddress);
-            var checker = new ProxyChecker(webProxy);
+            var checker = new ProxyChecker(webProxy, targetUrl);
             var proxyInfo = await checker.CheckProxyAsync();
+
+            if (country != null && proxyInfo.Country != country)
+            {
+                return;
+            }
 
             var table = new Table();
             table.AddColumn("Property");
@@ -78,6 +100,7 @@ public class Program
             table.AddRow("Download Speed", proxyInfo.DownloadSpeed == -1 ? "N/A" : $"{proxyInfo.DownloadSpeed:F2} KB/s");
             table.AddRow("Score", $"{proxyInfo.Score}/100");
             table.AddRow("Blacklisted", proxyInfo.IsBlacklisted ? "[red]Yes[/]" : "[green]No[/]");
+            table.AddRow("Uptime", $"{proxyInfo.UptimePercentage:F2}%");
 
             AnsiConsole.Write(table);
 
@@ -98,7 +121,9 @@ public class Program
     /// <param name="file">The file containing the list of proxies.</param>
     /// <param name="timeout">The timeout in milliseconds for each check.</param>
     /// <param name="output">The path to the output file.</param>
-    static async Task CheckProxiesFromFile(FileInfo file, int timeout, string? output)
+    /// <param name="country">The country to filter proxies by.</param>
+    /// <param name="targetUrl">The URL to test the proxy against.</param>
+    static async Task CheckProxiesFromFile(FileInfo file, int timeout, string? output, string? country, string? targetUrl)
     {
         if (!file.Exists)
         {
@@ -121,54 +146,60 @@ public class Program
         table.AddColumn("Download Speed");
         table.AddColumn("Score");
         table.AddColumn("Blacklisted");
+        table.AddColumn("Uptime");
 
         var proxyInfos = new List<ProxyInfo>();
-        var tasks = new List<Task>();
         var semaphore = new SemaphoreSlim(10); // Limit to 10 concurrent checks
 
-        foreach (var proxyAddress in proxies)
-        {
-            await semaphore.WaitAsync();
-
-            tasks.Add(Task.Run(async () =>
+        await AnsiConsole.Live(table)
+            .StartAsync(async ctx =>
             {
-                try
+                var tasks = proxies.Select(async proxyAddress =>
                 {
-                    if (IPEndPoint.TryParse(proxyAddress, out _))
+                    await semaphore.WaitAsync();
+                    try
                     {
-                        var webProxy = new WebProxy(proxyAddress);
-                        var checker = new ProxyChecker(webProxy);
-                        var proxyInfo = await checker.CheckProxyAsync();
-                        proxyInfos.Add(proxyInfo);
+                        if (IPEndPoint.TryParse(proxyAddress, out _))
+                        {
+                            var webProxy = new WebProxy(proxyAddress);
+                            var checker = new ProxyChecker(webProxy, targetUrl);
+                            var proxyInfo = await checker.CheckProxyAsync();
 
-                        table.AddRow(
-                            proxyInfo.Address ?? "N/A",
-                            proxyInfo.Type ?? "N/A",
-                            proxyInfo.Anonymity ?? "N/A",
-                            proxyInfo.Country ?? "N/A",
-                            proxyInfo.Asn ?? "N/A",
-                            proxyInfo.OutgoingIp ?? "N/A",
-                            proxyInfo.IsAlive ? "[green]Yes[/]" : "[red]No[/]",
-                            proxyInfo.Latency == -1 ? "N/A" : $"{proxyInfo.Latency} ms",
-                            proxyInfo.DownloadSpeed == -1 ? "N/A" : $"{proxyInfo.DownloadSpeed:F2} KB/s",
-                            $"{proxyInfo.Score}/100",
-                            proxyInfo.IsBlacklisted ? "[red]Yes[/]" : "[green]No[/]"
-                        );
+                            if (country != null && proxyInfo.Country != country)
+                            {
+                                return;
+                            }
+
+                            proxyInfos.Add(proxyInfo);
+
+                            table.AddRow(
+                                proxyInfo.Address ?? "N/A",
+                                proxyInfo.Type ?? "N/A",
+                                proxyInfo.Anonymity ?? "N/A",
+                                proxyInfo.Country ?? "N/A",
+                                proxyInfo.Asn ?? "N/A",
+                                proxyInfo.OutgoingIp ?? "N/A",
+                                proxyInfo.IsAlive ? "[green]Yes[/]" : "[red]No[/]",
+                                proxyInfo.Latency == -1 ? "N/A" : $"{proxyInfo.Latency} ms",
+                                proxyInfo.DownloadSpeed == -1 ? "N/A" : $"{proxyInfo.DownloadSpeed:F2} KB/s",
+                                $"{proxyInfo.Score}/100",
+                                proxyInfo.IsBlacklisted ? "[red]Yes[/]" : "[green]No[/]",
+                                $"{proxyInfo.UptimePercentage:F2}%"
+                            );
+                        }
+                        else
+                        {
+                            table.AddRow(proxyAddress, "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]No[/]", "N/A", "N/A", "0/100", "N/A", "N/A");
+                        }
                     }
-                    else
+                    finally
                     {
-                        table.AddRow(proxyAddress, "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]Invalid[/]", "[red]No[/]", "N/A", "N/A", "0/100", "N/A");
+                        semaphore.Release();
+                        ctx.Refresh();
                     }
-                }
-                finally
-                {
-                    semaphore.Release();
-                }
-            }));
-        }
-
-        await Task.WhenAll(tasks);
-        AnsiConsole.Write(table);
+                });
+                await Task.WhenAll(tasks);
+            });
 
         if (output != null)
         {
@@ -205,5 +236,46 @@ public class Program
         {
             AnsiConsole.MarkupLine("[red]Error:[/] Invalid output file format. Please use .csv or .json.[/]");
         }
+    }
+
+    /// <summary>
+    /// Scans a range of IP addresses for open proxy ports.
+    /// </summary>
+    /// <param name="ipRange">The IP range to scan.</param>
+    static async Task ScanProxies(string ipRange)
+    {
+        var commonPorts = new[] { 80, 8080, 1080, 3128, 8888 };
+        var ips = IPNetwork.Parse(ipRange).ListIPAddress();
+
+        var table = new Table();
+        table.AddColumn("Address");
+        table.AddColumn("Port");
+        table.AddColumn("Status");
+
+        await AnsiConsole.Live(table)
+            .StartAsync(async ctx =>
+            {
+                var tasks = ips.SelectMany(ip => commonPorts.Select(async port =>
+                {
+                    using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                    try
+                    {
+                        await socket.ConnectAsync(ip, port);
+                        if (socket.Connected)
+                        {
+                            table.AddRow(ip.ToString(), port.ToString(), "[green]Open[/]");
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore exceptions
+                    }
+                    finally
+                    {
+                        ctx.Refresh();
+                    }
+                }));
+                await Task.WhenAll(tasks);
+            });
     }
 }

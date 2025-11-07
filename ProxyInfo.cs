@@ -62,4 +62,9 @@ public class ProxyInfo
     /// Gets or sets a value indicating whether the proxy is blacklisted.
     /// </summary>
     public bool IsBlacklisted { get; set; }
+
+    /// <summary>
+    /// Gets or sets the uptime percentage of the proxy.
+    /// </summary>
+    public double UptimePercentage { get; set; }
 }

@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 using System.Diagnostics;
 using System.Net;
@@ -10,14 +11,18 @@ public class ProxyChecker
 {
     private readonly HttpClient _httpClient;
     private readonly WebProxy _proxy;
+    private readonly string _targetUrl;
+    private string _originalIp;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ProxyChecker"/> class.
     /// </summary>
     /// <param name="proxy">The proxy to use for the checks.</param>
-    public ProxyChecker(WebProxy proxy)
+    /// <param name="targetUrl">The URL to test the proxy against.</param>
+    public ProxyChecker(WebProxy proxy, string? targetUrl)
     {
         _proxy = proxy;
+        _targetUrl = targetUrl ?? "http://httpbin.org/headers";
         var handler = new HttpClientHandler
         {
             Proxy = proxy,
@@ -26,6 +31,8 @@ public class ProxyChecker
 
         _httpClient = new HttpClient(handler);
         _httpClient.Timeout = TimeSpan.FromMilliseconds(5000);
+
+        _originalIp = GetPublicIpAddressAsync().Result;
     }
 
     /// <summary>
@@ -42,7 +49,7 @@ public class ProxyChecker
 
         try
         {
-            var response = await _httpClient.GetStringAsync("http://httpbin.org/headers");
+            var response = await _httpClient.GetStringAsync(_targetUrl);
             var headers = JsonConvert.DeserializeObject<HttpBinHeaders>(response);
 
             var publicIpAddress = headers.Origin;
@@ -66,6 +73,8 @@ public class ProxyChecker
 
             proxyInfo.Score = CalculateScore(proxyInfo);
             proxyInfo.IsBlacklisted = await CheckBlacklistAsync(proxyInfo.OutgoingIp);
+
+            await UpdateUptimeAsync(proxyInfo);
         }
         catch
         {
@@ -73,6 +82,30 @@ public class ProxyChecker
         }
 
         return proxyInfo;
+    }
+
+    /// <summary>
+    /// Updates the uptime for the proxy.
+    /// </summary>
+    /// <param name="proxyInfo">The proxy info object.</param>
+    private async Task UpdateUptimeAsync(ProxyInfo proxyInfo)
+    {
+        using var db = new ProxyDbContext();
+        await db.Database.EnsureCreatedAsync();
+
+        var check = new ProxyCheck
+        {
+            Address = proxyInfo.Address,
+            IsAlive = proxyInfo.IsAlive,
+            Timestamp = DateTime.UtcNow
+        };
+        db.ProxyChecks.Add(check);
+        await db.SaveChangesAsync();
+
+        var checks = await db.ProxyChecks.Where(c => c.Address == proxyInfo.Address).ToListAsync();
+        var totalChecks = checks.Count;
+        var aliveChecks = checks.Count(c => c.IsAlive);
+        proxyInfo.UptimePercentage = totalChecks > 0 ? (double)aliveChecks / totalChecks * 100 : 0;
     }
 
     /// <summary>
@@ -284,15 +317,15 @@ public class ProxyChecker
     /// <summary>
     /// Gets the anonymity level of the proxy.
     /// </summary>
-    /// <param name="publicIpAddress">The public IP address of the system.</param>
+    /// <param name="proxyIpAddress">The public IP address of the proxy.</param>
     /// <param name="headers">The headers from the proxy.</param>
     /// <returns>The anonymity level of the proxy.</returns>
-    private string GetAnonymity(string publicIpAddress, Dictionary<string, string> headers)
+    private string GetAnonymity(string proxyIpAddress, Dictionary<string, string> headers)
     {
         if (headers.ContainsKey("X-Forwarded-For") || headers.ContainsKey("Via"))
         {
             var forwardedFor = headers.ContainsKey("X-Forwarded-For") ? headers["X-Forwarded-For"] : "";
-            if (forwardedFor.Contains(publicIpAddress))
+            if (forwardedFor.Contains(_originalIp))
             {
                 return "Transparent";
             }
@@ -300,6 +333,21 @@ public class ProxyChecker
         }
 
         return "Elite";
+    }
+
+    private async Task<string> GetPublicIpAddressAsync()
+    {
+        try
+        {
+            var httpClient = new HttpClient();
+            var response = await httpClient.GetStringAsync("https://api.ipify.org");
+            return response.Trim();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to get public IP address: {ex.Message}");
+            return string.Empty;
+        }
     }
 }
 
